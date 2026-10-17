@@ -667,20 +667,28 @@ func TestHandleImportClaudeAIStreamsRefusalsOnlyWhenDone(t *testing.T) {
 	}, done.Refusals)
 }
 
-// postImport posts data to an import route and decodes the stats from the JSON body or the stream's done event.
-func postImport(t *testing.T, srv *Server, path, filename string, data []byte, stream bool) importer.ImportStats {
+// importRequest builds a multipart request for either import response format.
+func importRequest(t *testing.T, path, filename string, data []byte, stream bool) *http.Request {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	part, err := writer.CreateFormFile("file", filename)
 	require.NoError(t, err)
-	_, _ = part.Write(data)
+	_, err = part.Write(data)
+	require.NoError(t, err)
 	require.NoError(t, writer.Close())
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, path, &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	if stream {
 		req.Header.Set("Accept", "text/event-stream")
 	}
+	return req
+}
+
+// postImport posts data to an import route and decodes the stats from the JSON body or the stream's done event.
+func postImport(t *testing.T, srv *Server, path, filename string, data []byte, stream bool) importer.ImportStats {
+	t.Helper()
+	req := importRequest(t, path, filename, data, stream)
 	rec := httptest.NewRecorder()
 	srv.mux.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
@@ -857,35 +865,43 @@ func TestHandleImportAnnouncesCommittedSessions(t *testing.T) {
 		name, path, file string
 		data             []byte
 		wantCode         int
+		titleOnly        bool
 	}{
-		{"claude-ai", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + "]"), http.StatusOK},
-		{"claude-ai partial", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + ",{"), http.StatusInternalServerError},
-		{"chatgpt", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv), http.StatusOK},
-		{"chatgpt partial", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv, "["), http.StatusInternalServerError},
+		{"claude-ai", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + "]"), http.StatusOK, false},
+		{"claude-ai partial", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + ",{"), http.StatusInternalServerError, false},
+		{"chatgpt", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv), http.StatusOK, false},
+		{"chatgpt partial", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv, "["), http.StatusInternalServerError, false},
+		{"claude-ai title only", "/api/v1/import/claude-ai", "conversations.json", []byte(strings.ReplaceAll("["+claudeAIUploadConv+"]", "SSE Test", "Renamed chat")), http.StatusOK, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := testServer(t, 5*time.Second)
+			if tt.titleOnly {
+				postImport(t, srv, tt.path, tt.file, []byte("["+claudeAIUploadConv+"]"), false)
+			}
 			srv.broadcaster = NewBroadcaster(0)
 			events, unsubscribe := srv.broadcaster.Subscribe()
 			defer unsubscribe()
-			var body bytes.Buffer
-			writer := multipart.NewWriter(&body)
-			part, err := writer.CreateFormFile("file", tt.file)
-			require.NoError(t, err)
-			_, err = part.Write(tt.data)
-			require.NoError(t, err)
-			require.NoError(t, writer.Close())
-			req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, tt.path, &body)
-			req.Header.Set("Content-Type", writer.FormDataContentType())
+			req := importRequest(t, tt.path, tt.file, tt.data, false)
 			rec := httptest.NewRecorder()
 			srv.mux.ServeHTTP(rec, req)
 			require.Equal(t, tt.wantCode, rec.Code, "body: %s", rec.Body.String())
+			if tt.titleOnly {
+				var stats importer.ImportStats
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &stats))
+				assert.Equal(t, 1, stats.Skipped)
+				assert.Zero(t, stats.Imported+stats.Updated)
+				session, err := srv.db.GetSession(t.Context(), "claude-ai:sse-test-001")
+				require.NoError(t, err)
+				require.NotNil(t, session)
+				require.NotNil(t, session.DisplayName)
+				assert.Equal(t, "Renamed chat", *session.DisplayName)
+			}
 
 			select {
 			case event := <-events:
 				assert.Equal(t, "sessions", event.Scope)
 			case <-time.After(5 * time.Second):
-				require.FailNow(t, "committed upload did not broadcast sessions")
+				require.FailNow(t, "committed import did not broadcast sessions")
 			}
 		})
 	}

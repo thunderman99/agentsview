@@ -22,9 +22,8 @@ func TestSetupTelemetryWakeSourcesAndRetry(t *testing.T) {
 		initial, retry, claimed bool
 	}{
 		{name: "initial visible content", initial: true},
-		{name: "sync and timer retry", scope: "sync", retry: true},
-		{name: "sessions", scope: "sessions"},
-		{name: "messages", scope: "messages"},
+		{name: "broadcast wake", scope: "sessions"},
+		{name: "hourly retry after failure", initial: true, retry: true},
 		{name: "empty archive cancellation"},
 		{name: "claimed empty archive exits", claimed: true},
 	} {
@@ -79,6 +78,9 @@ func TestSetupTelemetryWakeSourcesAndRetry(t *testing.T) {
 				assert.EqualValues(t, 1, sends.Load(), "capture starts without waiting for the timer")
 				first := <-attempts
 				if tc.retry {
+					broadcaster.Emit("sessions")
+					synctest.Wait()
+					assert.EqualValues(t, 1, sends.Load(), "broadcast after failure must wait for the timer")
 					second := <-attempts
 					assert.Equal(t, time.Hour, second.Sub(first))
 				}

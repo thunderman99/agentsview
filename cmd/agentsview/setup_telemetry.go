@@ -51,6 +51,8 @@ func runSetupTelemetry(ctx context.Context, interval time.Duration, cfg config.C
 		}
 		if err != nil && ctx.Err() == nil {
 			log.Printf("capture setup telemetry: %v", err)
+			// After a failure, retry only on the hourly ticker.
+			events = nil
 		}
 		select {
 		case <-ctx.Done():

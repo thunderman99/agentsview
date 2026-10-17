@@ -296,7 +296,7 @@ func (s *Server) importClaudeAIFromFileWithCallbacks(
 		return importErr
 	})
 	// Announce committed sessions even when the export fails partway.
-	if stats.Imported+stats.Updated > 0 && s.broadcaster != nil {
+	if s.broadcaster != nil {
 		s.broadcaster.Emit("sessions")
 	}
 	if err != nil {
@@ -440,7 +440,7 @@ func (s *Server) importChatGPTFromFile(
 		return importErr
 	})
 	// Announce committed sessions even when the export fails partway.
-	if stats.Imported+stats.Updated > 0 && s.broadcaster != nil {
+	if s.broadcaster != nil {
 		s.broadcaster.Emit("sessions")
 	}
 	if err != nil {

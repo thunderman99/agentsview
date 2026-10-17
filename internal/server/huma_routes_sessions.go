@@ -1435,12 +1435,7 @@ func (s *Server) humaUploadSession(
 	}
 	cleanupCommittedUpload(uploadCommit)
 	if s.broadcaster != nil {
-		for _, pr := range results {
-			if len(pr.Messages) > 0 {
-				s.broadcaster.Emit("sessions")
-				break
-			}
-		}
+		s.broadcaster.Emit("sessions")
 	}
 	main := results[0]
 	return &jsonOutput[uploadSessionResponse]{

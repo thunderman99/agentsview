@@ -4287,6 +4287,25 @@ func TestUploadSessionVariants(t *testing.T) {
 		}
 	})
 
+	t.Run("empty replacement broadcasts", func(t *testing.T) {
+		content := testjsonl.NewSessionBuilder().AddClaudeUser(tsEarly, "Hello upload").String()
+		assertStatus(t, te.upload(t, "empty-replacement.jsonl", content, "project=myproj&machine=remote"), http.StatusOK)
+		events, unsubscribe := te.broadcaster.Subscribe()
+		defer unsubscribe()
+		w := te.upload(t, "empty-replacement.jsonl", `{"type":"system","timestamp":"2026-03-01T10:00:00Z"}`+"\n", "project=myproj&machine=remote&allow_shorter=true")
+		assertStatus(t, w, http.StatusOK)
+		assert.Zero(t, decode[uploadResponse](t, w).Messages)
+		messages, err := te.db.GetAllMessages(t.Context(), "empty-replacement")
+		require.NoError(t, err)
+		assert.Empty(t, messages)
+		select {
+		case event := <-events:
+			assert.Equal(t, "sessions", event.Scope)
+		case <-time.After(5 * time.Second):
+			require.FailNow(t, "empty replacement did not broadcast sessions")
+		}
+	})
+
 	t.Run("sanitizes parsed rows", func(t *testing.T) {
 		rawInput := db.MaxPlausibleTokens + 200
 		rawOutput := db.MaxPlausibleTokens + 100
