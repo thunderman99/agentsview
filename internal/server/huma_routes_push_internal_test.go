@@ -646,7 +646,7 @@ func TestSyncThenRunForPushCopiesHealthyArchiveBesideCorruptSource(t *testing.T)
 			request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/push/pg", nil)
 			request.Header.Set("Accept", accept)
 			hctx := humago.NewContext(&huma.Operation{}, request, recorder)
-			runPushStream(hctx, func(_ func(storage.PushProgress)) (any, error) {
+			runPushStream(hctx, func(_, _ func(storage.PushProgress)) (any, error) {
 				var result storage.PushResult
 				err := f.srv.syncThenRunForPush(t.Context(), engine, f.db, false, nil, nil, nil,
 					func(forceFull bool) error {
@@ -737,7 +737,11 @@ func TestSyncThenRunForPushRunsOnePushAtATime(t *testing.T) {
 	second := make(chan error, 1)
 	go func() {
 		second <- f.srv.syncThenRunForPush(t.Context(), engine, f.db, true, nil, nil,
-			func() { close(waiting) },
+			func(phase string) {
+				if phase == storage.PushPhaseWaiting {
+					close(waiting)
+				}
+			},
 			func(bool) error {
 				record("second start")
 				return nil
@@ -766,7 +770,11 @@ func TestSyncThenRunForPushStopsWaitingForTurnWhenContextEnds(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- f.srv.syncThenRunForPush(ctx, engine, f.db, false, nil, nil,
-			func() { close(waiting) },
+			func(phase string) {
+				if phase == storage.PushPhaseWaiting {
+					close(waiting)
+				}
+			},
 			func(bool) error {
 				assert.Fail(t, "a push must not run while another push holds the turn")
 				return nil
@@ -1173,6 +1181,42 @@ func TestMirrorPushStreamsWaitingForAnotherPush(t *testing.T) {
 	assert.Contains(t, writer.String(), "event: progress\n")
 }
 
+// A daemon push tells the client when it starts copying, right after it stops
+// waiting for its turn, so a client whose stream drops can tell whether the
+// push started.
+func TestMirrorPushStreamsCopyingAfterWaiting(t *testing.T) {
+	f := newSyncRouteFixture(t)
+	f.srv.cfg.DuckDB = config.DuckDBConfig{
+		Path:        filepath.Join(t.TempDir(), "mirror.duckdb"),
+		MachineName: "daemon",
+	}
+	endTurn, err := f.srv.pushTurn.take(t.Context(), nil)
+	require.NoError(t, err)
+
+	stream, err := f.srv.humaMirrorPush(t.Context(), &daemonPushInput{})
+	require.NoError(t, err)
+	writer := newSignalingRecorder(`"Phase":"waiting"`)
+	request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/push/duckdb", nil)
+	request.Header.Set("Accept", "text/event-stream")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stream.Body(humago.NewContext(&huma.Operation{}, request, writer))
+	}()
+
+	<-writer.matched
+	endTurn()
+	<-done
+	body := writer.String()
+	waiting := strings.Index(body, `"Phase":"waiting"`)
+	copying := strings.Index(body, `"Phase":"copying"`)
+	finished := strings.Index(body, "event: done\n")
+	require.NotEqual(t, -1, copying, "stream has no copying report: %s", body)
+	require.NotEqual(t, -1, finished, "push did not finish: %s", body)
+	assert.Less(t, waiting, copying)
+	assert.Less(t, copying, finished)
+}
+
 // signalingRecorder is a goroutine-safe flushing ResponseWriter that closes
 // matched once its body contains want.
 type signalingRecorder struct {
@@ -1229,7 +1273,7 @@ func TestRunPushStreamReportsWhetherThePushStarted(t *testing.T) {
 				request := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/api/v1/push/pg", nil)
 				request.Header.Set("Accept", accept)
 				runPushStream(humago.NewContext(&huma.Operation{}, request, recorder),
-					func(func(storage.PushProgress)) (any, error) { return nil, tt.err })
+					func(_, _ func(storage.PushProgress)) (any, error) { return nil, tt.err })
 				payload := recorder.Body.String()
 				if accept == "text/event-stream" {
 					require.Contains(t, payload, "event: error\n")

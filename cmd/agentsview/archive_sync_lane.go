@@ -385,7 +385,7 @@ func (l *archiveSyncLane) syncBeforeExit(ctx context.Context, what string) error
 	l.engine.SyncAll(ctx, nil)
 	if ctx.Err() != nil {
 		return errors.New("the final sync did not finish in time. The next " +
-			"run picks up changes made since the last sync")
+			"run will pick up changes made since the last sync")
 	}
 	return nil
 }

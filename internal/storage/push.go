@@ -44,7 +44,7 @@ type PushProgress struct {
 	// "" during the session/message push, and "vectors" during the vector
 	// phase, whose progress is carried by the Vector* fields.
 	// PushPhaseWaiting means a daemon push is waiting for another push to
-	// finish.
+	// finish, and PushPhaseCopying that it is about to start copying.
 	Phase            string
 	SessionsDone     int
 	SessionsTotal    int
@@ -168,3 +168,8 @@ type PushNotStartedError struct{ Err error }
 
 func (e PushNotStartedError) Error() string { return e.Err.Error() }
 func (e PushNotStartedError) Unwrap() error { return e.Err }
+
+// PushPhaseCopying is the progress phase a daemon push reports just before it
+// starts copying to the destination. A client whose stream ends before this
+// report knows the push never started.
+const PushPhaseCopying = "copying"

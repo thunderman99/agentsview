@@ -27,7 +27,6 @@ import (
 const (
 	lastPushBoundaryStateKey               = "last_push_boundary_state"
 	lastPushSourceArchiveIDKey             = "pg_source_archive_id_v1"
-	lastPushDatabaseGenerationKey          = "pg_source_database_generation_v1"
 	lastPushTargetFingerprintKey           = "pg_target_fingerprint_v1"
 	sessionAliasBackfillStateKey           = "pg_session_alias_backfill_v1"
 	legacyProjectIdentityStateKey          = "project_identity_publication_revision_v2"
@@ -85,6 +84,9 @@ func (s *Sync) Push(
 	return s.PushWithOptions(ctx, storage.PushOptions{Full: full}, onProgress)
 }
 
+// fullRunSaveTimeout bounds the progress save after a failed full push.
+const fullRunSaveTimeout = 30 * time.Second
+
 // PushWithOptions is Push with per-push options; see storage.PushOptions.
 func (s *Sync) PushWithOptions(
 	ctx context.Context, opts storage.PushOptions,
@@ -97,8 +99,12 @@ func (s *Sync) PushWithOptions(
 	case err == nil:
 	case run != nil:
 		// Keep what the run committed since its last checkpoint. The push
-		// may have failed because ctx ended, so save without it.
-		err = errors.Join(err, run.save(context.WithoutCancel(ctx)))
+		// may have failed because ctx ended, so save without it, but within
+		// a limit: the save waits for the archive writer, which a stopping
+		// daemon may never reopen.
+		saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), fullRunSaveTimeout)
+		err = errors.Join(err, run.save(saveCtx))
+		cancel()
 	case opts.Full:
 		// The push failed before it recorded the requested full push, so
 		// nothing can resume it.
@@ -225,17 +231,6 @@ func (s *Sync) pushWithOptions(
 		return result, fmt.Errorf("reading database generation: %w", err)
 	}
 	s.databaseGeneration = databaseGeneration
-	// A rebuilt archive gets a new database ID. Rows the rebuild wrote before
-	// the stored cutoff fall outside the next incremental window, so a changed
-	// ID forces a full push.
-	storedGeneration, err := state.GetSyncState(ctx, lastPushDatabaseGenerationKey)
-	if err != nil {
-		return result, fmt.Errorf("reading %s: %w", lastPushDatabaseGenerationKey, err)
-	}
-	if storedGeneration != "" && storedGeneration != databaseGeneration {
-		full = true
-		noteFull("archive was rebuilt")
-	}
 	markerID, err := s.pushMarkerID(ctx)
 	if err != nil {
 		return result, err
@@ -247,6 +242,13 @@ func (s *Sync) pushWithOptions(
 	legacyMarkerMachines := pushMarkerLegacyMachines(
 		markerMachine, markerMachineAliases,
 	)
+	// A rebuilt archive keeps this archive's push marker but not its push
+	// watermark, so PostgreSQL can hold rows the rebuild dropped. Only a full
+	// push removes them.
+	if lastPush == "" && boundaryState == "" && markerExists {
+		full = true
+		noteFull("local push state was lost, as after an archive rebuild")
+	}
 	var reconciledScopeMoveIDs []string
 	var identityRefreshSessionIDs []string
 	// Keep the backfill marker scoped to target only; all other push
@@ -613,31 +615,8 @@ func (s *Sync) pushWithOptions(
 	}
 
 	if len(sessions) == 0 {
-		if err := s.recordUnchangedGeneration(ctx, state); err != nil {
-			return result, err
-		}
-		if s.isFiltered() {
-			// Filtered pushes use filter-scoped sync state, so
-			// they can advance their own watermark without
-			// moving the unfiltered/global cursor.
-			if err := finalizeFilteredPushState(ctx,
-				state, lastPush, cutoff, runCommitted,
-				priorFingerprints, sessionFingerprints,
-				result.Errors,
-			); err != nil {
-				return result, err
-			}
-		} else {
-			if err := finalizeUnfilteredPushState(ctx,
-				state, lastPush, cutoff, runCommitted,
-				priorFingerprints, sessionFingerprints,
-				result.Errors,
-			); err != nil {
-				return result, err
-			}
-		}
-		if err := persistPushTargetFingerprint(ctx,
-			state, s.targetFingerprint,
+		if err := s.savePushState(ctx, state, lastPush, cutoff, runCommitted,
+			priorFingerprints, sessionFingerprints, result.Errors,
 		); err != nil {
 			return result, err
 		}
@@ -762,31 +741,9 @@ func (s *Sync) pushWithOptions(
 		}
 	}
 
-	if err := s.recordUnchangedGeneration(ctx, state); err != nil {
-		return result, err
-	}
-	if s.isFiltered() {
-		// Filtered pushes use filter-scoped sync state, so
-		// they can advance their own watermark without moving
-		// the unfiltered/global cursor.
-		if err := finalizeFilteredPushState(ctx,
-			state, lastPush, cutoff, append(pushed, runCommitted...),
-			priorFingerprints, sessionFingerprints,
-			result.Errors,
-		); err != nil {
-			return result, err
-		}
-	} else {
-		if err := finalizeUnfilteredPushState(ctx,
-			state, lastPush, cutoff, append(pushed, runCommitted...),
-			priorFingerprints, sessionFingerprints,
-			result.Errors,
-		); err != nil {
-			return result, err
-		}
-	}
-	if err := persistPushTargetFingerprint(ctx,
-		state, s.targetFingerprint,
+	if err := s.savePushState(ctx, state, lastPush, cutoff,
+		append(pushed, runCommitted...), priorFingerprints, sessionFingerprints,
+		result.Errors,
 	); err != nil {
 		return result, err
 	}
@@ -1841,25 +1798,45 @@ func persistPushSourceArchiveID(ctx context.Context, local syncStateStore, archi
 	return nil
 }
 
-// recordUnchangedGeneration fails the push when the local archive was
-// replaced while it ran, before the push saves its watermark: the push mixed
-// rows from two archives, and its cutoff would hide rows the rebuild wrote.
-// Otherwise it records the generation the push read, so the next push runs
-// full if the archive is rebuilt in between.
-func (s *Sync) recordUnchangedGeneration(ctx context.Context, state syncStateStore) error {
-	current, err := s.local.GetDatabaseID(ctx)
-	if err != nil {
-		return fmt.Errorf("reading database generation: %w", err)
+// savePushState saves the push watermark, boundary state, and target
+// fingerprint in one archive transaction, and only while the archive is the
+// one the push read. A /resync or compaction can replace the archive during
+// a push; the push then mixed rows from two archives, and its cutoff would
+// hide rows the rebuild wrote. The replacement starts without push state, so
+// the next push runs full.
+func (s *Sync) savePushState(ctx context.Context,
+	state syncStateStore,
+	lastPush, cutoff string,
+	sessions []db.Session,
+	priorFingerprints map[string]string,
+	sessionFingerprints map[string]string,
+	sessionErrors int,
+) error {
+	batch := newSyncStateBatch()
+	// Filtered pushes use filter-scoped sync state, so they can advance
+	// their own watermark without moving the unfiltered/global cursor.
+	finalize := finalizeUnfilteredPushState
+	if s.isFiltered() {
+		finalize = finalizeFilteredPushState
 	}
-	if current != s.databaseGeneration {
-		return errors.New(
-			"the local archive was rebuilt during the push; the next push will be full",
-		)
+	if err := finalize(ctx, batch, lastPush, cutoff, sessions,
+		priorFingerprints, sessionFingerprints, sessionErrors,
+	); err != nil {
+		return err
 	}
-	if err := state.SetSyncState(ctx, lastPushDatabaseGenerationKey, current); err != nil {
-		return fmt.Errorf("updating %s: %w", lastPushDatabaseGenerationKey, err)
+	if err := persistPushTargetFingerprint(ctx, batch, s.targetFingerprint); err != nil {
+		return err
 	}
-	return nil
+	writer, ok := state.(databaseSyncStateWriter)
+	if !ok {
+		return fmt.Errorf("sync state store %T cannot save push state in one transaction", state)
+	}
+	err := writer.SetSyncStatesForDatabase(ctx, s.databaseGeneration, batch.values)
+	if errors.Is(err, db.ErrDatabaseReplaced) {
+		return errors.New("the local archive was rebuilt while this push ran. " +
+			"The next push will resend every session")
+	}
+	return err
 }
 
 func pushTargetState(

@@ -10,6 +10,7 @@ import (
 	"encoding/json/v2"
 	"errors"
 	"fmt"
+	"log"
 	pathpkg "path"
 	"path/filepath"
 	"sort"
@@ -6796,10 +6797,16 @@ func (db *DB) MirrorPushCutoff(ctx context.Context) (string, error) {
 // returns ctx.Err() if ctx ends first. A write can still fail if a new
 // handoff starts after it returns.
 func (db *DB) WaitForWriter(ctx context.Context) error {
+	start := time.Now()
+	announced := false
 	for db.writerClosed.Load() {
+		if !announced && time.Since(start) >= writerHandoffNoticeAfter {
+			announced = true
+			log.Printf("waiting for a local sync to finish before writing the archive")
+		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("stopped while waiting for the local sync to finish: %w", ctx.Err())
 		case <-time.After(writerHandoffPollInterval):
 		}
 	}
@@ -6809,6 +6816,10 @@ func (db *DB) WaitForWriter(ctx context.Context) error {
 // writerHandoffPollInterval spaces checks for the end of a worker handoff.
 // Handoffs last seconds to minutes.
 const writerHandoffPollInterval = 50 * time.Millisecond
+
+// writerHandoffNoticeAfter is how long WaitForWriter waits before it logs that
+// it is waiting, so a short handoff stays quiet.
+const writerHandoffNoticeAfter = 5 * time.Second
 
 // normalizeMirrorWindowBound parses an RFC3339Nano timestamp and formats it
 // as ms-precision UTC text matching the sync_marker column format, so the

@@ -174,9 +174,16 @@ func archivePushWatchWatcherOptions(
 }
 
 func completeDuckDBWatchPush(
-	res storage.MirrorPushResult, reason pushReason,
+	res storage.MirrorPushResult, reason pushReason, full bool,
 ) error {
 	logDuckDBWatchPushResult(res, reason)
+	if full && res.Diagnostics.Deferred {
+		// A deferred push wrote nothing, so the requested full push is
+		// still owed.
+		return storage.PushNotStartedError{
+			Err: fmt.Errorf("full push deferred: %s", res.Diagnostics.DeferredReason),
+		}
+	}
 	if res.Errors > 0 {
 		return fmt.Errorf("%d session(s) failed to push", res.Errors)
 	}
@@ -441,8 +448,10 @@ func startDaemonPushHeartbeatTo(w io.Writer, label string) func() {
 // progress events (local sync, schema migration), and the first streamed
 // progress event silences it for good so heartbeat lines never interleave
 // with the in-place progress line. A push that waits for another push prints
-// one line saying so and keeps the heartbeat. The returned finish func stops
-// the heartbeat (if no event ever arrived) and clears the in-place line.
+// one line saying so and keeps the heartbeat. The report that the copy is
+// starting also keeps it, since schema migration may follow without progress
+// events. The returned finish func stops the heartbeat (if no event ever
+// arrived) and clears the in-place line.
 func daemonPushProgress[P any](
 	label string, phase func(P) string, render func(P),
 ) (onProgress func(P), finish func()) {
@@ -450,10 +459,13 @@ func daemonPushProgress[P any](
 	var once, waitOnce stdsync.Once
 	stopHeartbeat := func() { once.Do(stop) }
 	onProgress = func(p P) {
-		if phase(p) == storage.PushPhaseWaiting {
+		switch phase(p) {
+		case storage.PushPhaseWaiting:
 			waitOnce.Do(func() {
 				fmt.Println("Waiting for another push on the daemon to finish...")
 			})
+			return
+		case storage.PushPhaseCopying:
 			return
 		}
 		stopHeartbeat()
@@ -568,7 +580,7 @@ func (b daemonArchiveWriteBackend) DuckDBPushWatch(
 		if err != nil {
 			return err
 		}
-		return completeDuckDBWatchPush(res, reason)
+		return completeDuckDBWatchPush(res, reason, full)
 	}
 	return archivePushWatch{
 		hooks:    b.watchHooks,

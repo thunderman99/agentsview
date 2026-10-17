@@ -1122,10 +1122,7 @@ func TestPushMessageNanosecondTimestampNoRewriteRegression(t *testing.T) {
 		"2026-01-01T00:00:00.123456Z")
 
 	ctidBefore := pgMessageCTID(t, pg, sessID, 1)
-	require.NoError(t, localDB.SetSyncState(t.Context(), "last_push_at", ""),
-		"clearing last_push_at")
-	require.NoError(t, localDB.SetSyncState(t.Context(), lastPushBoundaryStateKey, ""),
-		"clearing boundary state")
+	forgetPushHistory(t, localDB, pg)
 
 	_, err = sync.Push(ctx, false, nil)
 	require.NoError(t, err, "Push same timestamp")
@@ -2355,6 +2352,20 @@ func assertPGMessageTimestamp(
 	assert.Equal(t, want, FormatISO8601(gotTime.Time))
 }
 
+// forgetPushHistory makes the next push look like this archive's first push to
+// a database that already holds its sessions, so that push compares
+// fingerprints. Clearing only the local push state would force a full push,
+// because the push marker shows this archive pushed before.
+func forgetPushHistory(t *testing.T, localDB *db.DB, pg *sql.DB) {
+	t.Helper()
+	require.NoError(t, localDB.SetSyncState(t.Context(), "last_push_at", ""),
+		"clearing last_push_at")
+	require.NoError(t, localDB.SetSyncState(t.Context(), lastPushBoundaryStateKey, ""),
+		"clearing boundary state")
+	_, err := pg.Exec(`DELETE FROM sync_metadata WHERE key LIKE 'push_marker:%'`)
+	require.NoError(t, err, "deleting push markers")
+}
+
 func pgMessageCTID(
 	t *testing.T,
 	pg *sql.DB,
@@ -2461,11 +2472,7 @@ func TestPushMessagesSanitizesNULBytes(t *testing.T) {
 		 WHERE session_id = $1 AND ordinal = 0`, sessID,
 	).Scan(&ctidBefore), "reading ctid before second push")
 
-	require.NoError(t, localDB.SetSyncState(t.Context(), "last_push_at", ""),
-		"clearing last_push_at")
-	require.NoError(t,
-		localDB.SetSyncState(t.Context(), lastPushBoundaryStateKey, ""),
-		"clearing boundary state")
+	forgetPushHistory(t, localDB, pg)
 
 	res, err = sync.Push(ctx, false, nil)
 	require.NoError(t, err, "Push (second)")

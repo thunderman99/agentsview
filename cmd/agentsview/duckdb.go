@@ -56,7 +56,7 @@ func (p *duckDBPusher) push(
 	if err != nil {
 		return err
 	}
-	return completeDuckDBWatchPush(res, reason)
+	return completeDuckDBWatchPush(res, reason, full)
 }
 
 type DuckDBQuackServeConfig struct {

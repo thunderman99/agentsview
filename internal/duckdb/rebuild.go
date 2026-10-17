@@ -308,9 +308,9 @@ func buildMirror(
 	s, err := New(ctx, file, local, machine, opts)
 	if err != nil {
 		if isMirrorHeldError(err) {
-			return storage.MirrorPushResult{}, rebuildInProgressError(path, err)
+			err = rebuildInProgressError(path, err)
 		}
-		return storage.MirrorPushResult{}, err
+		return storage.MirrorPushResult{}, storage.PushNotStartedError{Err: err}
 	}
 	result, buildErr := buildMirrorInto(ctx, s, opts, run, onProgress)
 	if closeErr := s.Close(); closeErr != nil && buildErr == nil {
@@ -501,15 +501,19 @@ func buildMirrorInto(
 	onProgress func(storage.MirrorPushProgress),
 ) (storage.MirrorPushResult, error) {
 	start := time.Now()
+	// Until the run is recorded in the rebuild file, no later push can resume
+	// this rebuild.
 	if err := createSchema(ctx, s.duck); err != nil {
-		return storage.MirrorPushResult{}, err
+		return storage.MirrorPushResult{}, storage.PushNotStartedError{Err: err}
 	}
 	encodedRun, err := json.Marshal(run)
 	if err != nil {
-		return storage.MirrorPushResult{}, fmt.Errorf("encoding duckdb rebuild run: %w", err)
+		return storage.MirrorPushResult{}, storage.PushNotStartedError{
+			Err: fmt.Errorf("encoding duckdb rebuild run: %w", err),
+		}
 	}
 	if err := recordMetadataKey(ctx, s.duck, rebuildRunMetadataKey, string(encodedRun)); err != nil {
-		return storage.MirrorPushResult{}, err
+		return storage.MirrorPushResult{}, storage.PushNotStartedError{Err: err}
 	}
 	snapshot, err := captureRebuildSnapshot(ctx, s.local)
 	if err != nil {

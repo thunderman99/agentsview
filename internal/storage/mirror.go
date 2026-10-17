@@ -108,7 +108,8 @@ type MirrorSessionCounts struct {
 // MirrorPushProgress is reported after each attempted session.
 type MirrorPushProgress struct {
 	// Phase is PushPhaseWaiting while a daemon push waits for another push
-	// to finish, and "" otherwise.
+	// to finish, PushPhaseCopying once when it is about to start copying,
+	// and "" otherwise.
 	Phase         string
 	SessionsDone  int
 	SessionsTotal int

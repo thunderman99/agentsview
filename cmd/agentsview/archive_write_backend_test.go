@@ -1679,3 +1679,16 @@ func testLocalArchiveWriteBackend(t *testing.T) *localArchiveWriteBackend {
 		database: database,
 	}
 }
+
+// A deferred DuckDB push wrote nothing. A --full watch must keep its request
+// for the retry; an ordinary watch push just waits for the next one.
+func TestDeferredDuckDBWatchPushKeepsFull(t *testing.T) {
+	var res storage.MirrorPushResult
+	res.Diagnostics.Deferred = true
+	res.Diagnostics.DeferredReason = "another push is rebuilding the mirror"
+
+	err := completeDuckDBWatchPush(res, reasonChange, true)
+	_, notStarted := errors.AsType[storage.PushNotStartedError](err)
+	assert.True(t, notStarted, "err: %v", err)
+	assert.NoError(t, completeDuckDBWatchPush(res, reasonChange, false))
+}

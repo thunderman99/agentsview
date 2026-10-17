@@ -60,6 +60,29 @@ func TestParseDaemonPushSSE(t *testing.T) {
 		assert.Contains(t, err.Error(), "missing done event")
 	})
 
+	// A watch keeps a --full request only when the push never started.
+	t.Run("stream that ends tells whether the copy started", func(t *testing.T) {
+		waitingEvent := "event: progress\n" + `data: {"Phase":"waiting"}` + "\n\n"
+		copyingEvent := "event: progress\n" + `data: {"Phase":"copying"}` + "\n\n"
+		for _, tt := range []struct {
+			name    string
+			events  []string
+			started bool
+		}{
+			{"while waiting", []string{waitingEvent}, false},
+			{"after the copy started", []string{waitingEvent, copyingEvent, progressEvent}, true},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				_, err := consumeDaemonPushEvents[storage.PushResult, storage.PushProgress](
+					daemonEventStream(strings.NewReader(stream(tt.events...))), nil,
+				)
+				require.ErrorContains(t, err, "missing done event")
+				_, notStarted := errors.AsType[storage.PushNotStartedError](err)
+				assert.Equal(t, tt.started, !notStarted)
+			})
+		}
+	})
+
 	t.Run("terminal report can exceed ten mebibytes", func(t *testing.T) {
 		type largeReport struct {
 			ProjectMetadata string `json:"project_metadata"`

@@ -47,6 +47,44 @@ func (h handoffSyncState) GetOrCreateSyncState(
 	})
 }
 
+// databaseSyncStateWriter writes several sync-state values in one archive
+// transaction, and only while the archive's database ID is still databaseID.
+type databaseSyncStateWriter interface {
+	SetSyncStatesForDatabase(ctx context.Context, databaseID string, values map[string]string) error
+}
+
+func (h handoffSyncState) SetSyncStatesForDatabase(
+	ctx context.Context, databaseID string, values map[string]string,
+) error {
+	_, err := retryAcrossHandoff(ctx, h.local, func() (struct{}, error) {
+		return struct{}{}, h.local.SetSyncStatesForDatabase(ctx, databaseID, values)
+	})
+	return err
+}
+
+// syncStateBatch collects sync-state writes so a caller can commit them
+// together. It is write-only.
+type syncStateBatch struct{ values map[string]string }
+
+func newSyncStateBatch() *syncStateBatch {
+	return &syncStateBatch{values: make(map[string]string)}
+}
+
+var errSyncStateBatchWriteOnly = errors.New("sync state batch is write-only")
+
+func (b *syncStateBatch) GetSyncState(context.Context, string) (string, error) {
+	return "", errSyncStateBatchWriteOnly
+}
+
+func (b *syncStateBatch) SetSyncState(_ context.Context, key, value string) error {
+	b.values[key] = value
+	return nil
+}
+
+func (b *syncStateBatch) GetOrCreateSyncState(context.Context, string, string) (string, error) {
+	return "", errSyncStateBatchWriteOnly
+}
+
 func retryAcrossHandoff[T any](
 	ctx context.Context, local *db.DB, write func() (T, error),
 ) (T, error) {
@@ -155,6 +193,23 @@ func (s *scopedSyncStateStore) SetSyncState(ctx context.Context,
 		return err
 	}
 	return s.base.SetSyncState(ctx, s.scopedKey(key), value)
+}
+
+func (s *scopedSyncStateStore) SetSyncStatesForDatabase(
+	ctx context.Context, databaseID string, values map[string]string,
+) error {
+	if err := s.ensureMigration(ctx); err != nil {
+		return err
+	}
+	writer, ok := s.base.(databaseSyncStateWriter)
+	if !ok {
+		return fmt.Errorf("sync state store %T cannot write in one transaction", s.base)
+	}
+	scoped := make(map[string]string, len(values))
+	for key, value := range values {
+		scoped[s.scopedKey(key)] = value
+	}
+	return writer.SetSyncStatesForDatabase(ctx, databaseID, scoped)
 }
 
 func (s *scopedSyncStateStore) GetOrCreateSyncState(ctx context.Context,

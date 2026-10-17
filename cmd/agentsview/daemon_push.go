@@ -170,10 +170,12 @@ func daemonRejectsWatchScope(status int, body []byte) bool {
 }
 
 // consumeDaemonPushEvents applies daemon progress and terminal events decoded
-// by the generated client's stream.
+// by the generated client's stream. A stream that ends before the daemon
+// reports the copying phase never started a push. Daemons older than that
+// report never send it, so a dropped stream from one keeps --full.
 func consumeDaemonPushEvents[T, P any](stream *runtime.Stream[[]byte], onProgress func(P)) (T, error) {
 	var result, zero T
-	var done bool
+	var done, copying bool
 	var pushErr error
 	defer stream.Close()
 	for stream.Next() {
@@ -188,6 +190,11 @@ func consumeDaemonPushEvents[T, P any](stream *runtime.Stream[[]byte], onProgres
 			}
 			done = true
 		case "progress":
+			var phase struct{ Phase string }
+			if json.Unmarshal(frame.Data, &phase) == nil &&
+				phase.Phase == storage.PushPhaseCopying {
+				copying = true
+			}
 			if onProgress != nil {
 				var progress P
 				if err := json.Unmarshal(frame.Data, &progress); err != nil {
@@ -205,13 +212,13 @@ func consumeDaemonPushEvents[T, P any](stream *runtime.Stream[[]byte], onProgres
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return zero, err
+		return zero, startedIf(copying, err)
 	}
 	if pushErr != nil {
 		return zero, pushErr
 	}
 	if !done {
-		return zero, errors.New("daemon push response missing done event")
+		return zero, startedIf(copying, errors.New("daemon push response missing done event"))
 	}
 	return result, nil
 }
@@ -229,6 +236,11 @@ func daemonPushError(err error, body []byte, startedByDefault bool) error {
 	if json.Unmarshal(body, &status) == nil && status.PushStarted != nil {
 		started = *status.PushStarted
 	}
+	return startedIf(started, err)
+}
+
+// startedIf marks err as a push that never started unless started is set.
+func startedIf(started bool, err error) error {
 	if started {
 		return err
 	}

@@ -147,6 +147,15 @@ func Push(
 	ctx context.Context, path string, local *db.DB, machine string,
 	opts storage.MirrorPushOptions, full bool, onProgress func(storage.MirrorPushProgress),
 ) (result storage.MirrorPushResult, err error) {
+	// A --full push that fails before its rebuild starts left nothing a later
+	// push resumes. buildMirror reports its own failures before it records
+	// the rebuild run.
+	building := false
+	defer func() {
+		if err != nil && full && !building {
+			err = storage.PushNotStartedError{Err: err}
+		}
+	}()
 	if err := sweepStaleTempFiles(path); err != nil {
 		log.Printf("duckdbsync: sweeping stale rebuild temp files: %v", err)
 	}
@@ -269,6 +278,7 @@ func Push(
 		return storage.MirrorPushResult{}, err
 	}
 	log.Printf("duckdbsync: rebuilding mirror: %s", reason)
+	building = true
 	result, err = buildMirror(ctx, path, local, machine, opts, run, onProgress)
 	result.Diagnostics.RebuildReason = reason
 	if err == nil {

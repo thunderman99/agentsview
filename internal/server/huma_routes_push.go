@@ -109,21 +109,24 @@ func (s *Server) registerPushRoutes() {
 // runPushStream executes run once and writes its outcome to the client: SSE
 // progress/done/error events when the request negotiated an event stream
 // (the CLI's daemon-delegated push renders these live), a single JSON body
-// otherwise. run receives the progress callback to thread into the push;
-// it is a throttled SSE sender in stream mode and nil in JSON mode — the
+// otherwise. run receives two senders, both nil in JSON mode: progress, a
+// throttled sender to thread into the push, and phase, an unthrottled sender
+// for the waiting and copying reports a client must not miss. The
 // daemon-side debug.log progress logger is composed by the caller. An error
 // body carries push_started, so a watch client can keep a --full request
 // that no push started.
 func runPushStream[T any](
 	hctx huma.Context,
-	run func(onProgress func(T)) (any, error),
+	run func(progress, phase func(T)) (any, error),
 ) {
 	if strings.Contains(hctx.Header("Accept"), "text/event-stream") {
 		if sse, ok := newHumaSSEStream(hctx); ok {
 			send := newPushProgressStreamSender(func(p T) {
 				sse.SendJSON("progress", p)
 			})
-			result, err := run(send)
+			result, err := run(send, func(p T) {
+				sse.SendJSON("progress", p)
+			})
 			if err != nil {
 				sse.SendJSON("error", pushErrorBody(err.Error(), err))
 				return
@@ -132,7 +135,7 @@ func runPushStream[T any](
 			return
 		}
 	}
-	result, err := run(nil)
+	result, err := run(nil, nil)
 	if err != nil {
 		if errors.Is(err, db.ErrWriterClosed) {
 			server, ok := hctx.Context().Value(ctxKeyHumaServer).(*Server)
@@ -161,6 +164,13 @@ func pushErrorBody(message string, err error) pushErrorResponse {
 	_, notStarted := errors.AsType[storage.PushNotStartedError](err)
 	_, rebuilt := errors.AsType[archiveRebuiltError](err)
 	return pushErrorResponse{Error: message, PushStarted: !notStarted || rebuilt}
+}
+
+// logPushPhase logs a daemon push that has to wait for another push.
+func logPushPhase(name, phase string) {
+	if phase == storage.PushPhaseWaiting {
+		log.Printf("%s push: waiting for another push to finish", name)
+	}
 }
 
 // composePushProgress fans one progress report out to each non-nil callback.
@@ -518,9 +528,11 @@ func (p *pushTurn) take(ctx context.Context, onWait func()) (func(), error) {
 // takes its cutoff under the archive write lock so later pushes pick those
 // writes up. Pushes take turns (see pushTurn), and a push takes its turn
 // before its own sync, so its archive rebuild never replaces the archive
-// while another push reads it. onWait, when set, is called if the push must
-// wait for its turn. Before the work it waits for any running sync and
-// flushes deferred signal recomputes, so the push copies settled sessions.
+// while another push reads it. onPhase, when set, is called with
+// storage.PushPhaseWaiting if the push must wait for its turn, and with
+// storage.PushPhaseCopying just before the work runs. Before the work it
+// waits for any running sync and flushes deferred signal recomputes, so the
+// push copies settled sessions.
 // An error from before work runs is a storage.PushNotStartedError.
 //
 // Full and stale-archive pushes are archive-scale: with the worker-backed
@@ -537,10 +549,13 @@ func (s *Server) syncThenRunForPush(
 	full bool,
 	watchBatch *syncpkg.WatchBatch,
 	watchRecovery *syncpkg.WatchRecoveryScope,
-	onWait func(),
+	onPhase func(phase string),
 	work func(forceFull bool) error,
 ) error {
-	endTurn, err := s.pushTurn.take(ctx, onWait)
+	if onPhase == nil {
+		onPhase = func(string) {}
+	}
+	endTurn, err := s.pushTurn.take(ctx, func() { onPhase(storage.PushPhaseWaiting) })
 	if err != nil {
 		return storage.PushNotStartedError{Err: err}
 	}
@@ -558,6 +573,7 @@ func (s *Server) syncThenRunForPush(
 	if err := engine.SettleForPush(ctx); err != nil {
 		return markArchiveRebuilt(ctx, local, startDatabaseID, storage.PushNotStartedError{Err: err})
 	}
+	onPhase(storage.PushPhaseCopying)
 	pushErr := markArchiveRebuilt(ctx, local, startDatabaseID, work(forceFull))
 	if incomplete == nil {
 		return pushErr
@@ -697,7 +713,7 @@ func (s *Server) humaReplicaPush(
 	body := in.Body
 	return &huma.StreamResponse{Body: func(hctx huma.Context) {
 		runPushStream(hctx, func(
-			streamProgress func(storage.PushProgress),
+			streamProgress, streamPhase func(storage.PushProgress),
 		) (any, error) {
 			onProgress := composePushProgress(
 				newReplicaPushProgressLogger(name), streamProgress,
@@ -728,10 +744,10 @@ func (s *Server) humaReplicaPush(
 			var result storage.PushResult
 			err := s.syncThenRunForPush(
 				ctx, engine, local, body.Full, body.WatchBatch, body.WatchRecovery,
-				func() {
-					log.Printf("%s push: waiting for another push to finish", name)
-					if streamProgress != nil {
-						streamProgress(storage.PushProgress{Phase: storage.PushPhaseWaiting})
+				func(phase string) {
+					logPushPhase(name, phase)
+					if streamPhase != nil {
+						streamPhase(storage.PushProgress{Phase: phase})
 					}
 				},
 				func(forceFull bool) error {
@@ -794,17 +810,17 @@ func (s *Server) humaMirrorPush(
 	name := s.mirror.Name()
 	return &huma.StreamResponse{Body: func(hctx huma.Context) {
 		runPushStream(hctx, func(
-			streamProgress func(storage.MirrorPushProgress),
+			streamProgress, streamPhase func(storage.MirrorPushProgress),
 		) (any, error) {
 			onProgress := composePushProgress(
 				newMirrorPushProgressLogger(name), streamProgress,
 			)
 			var result storage.MirrorPushResult
 			err := s.syncThenRunForPush(ctx, engine, local, body.Full, nil, nil,
-				func() {
-					log.Printf("%s push: waiting for another push to finish", name)
-					if streamProgress != nil {
-						streamProgress(storage.MirrorPushProgress{Phase: storage.PushPhaseWaiting})
+				func(phase string) {
+					logPushPhase(name, phase)
+					if streamPhase != nil {
+						streamPhase(storage.MirrorPushProgress{Phase: phase})
 					}
 				},
 				func(forceFull bool) error {
