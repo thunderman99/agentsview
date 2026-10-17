@@ -25,7 +25,7 @@ func TestSetupTelemetryWakeSourcesAndRetry(t *testing.T) {
 		{name: "broadcast wake", scope: "sessions"},
 		{name: "hourly retry after failure", initial: true, retry: true},
 		{name: "empty archive cancellation"},
-		{name: "claimed visible content", initial: true, claimed: true},
+		{name: "claimed empty archive", claimed: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -59,7 +59,7 @@ func TestSetupTelemetryWakeSourcesAndRetry(t *testing.T) {
 					select {
 					case <-done:
 					default:
-						assert.Fail(t, "claimed installation kept observing visible content")
+						assert.Fail(t, "claimed installation kept observing the archive")
 					}
 					return
 				}

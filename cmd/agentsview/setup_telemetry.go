@@ -35,11 +35,18 @@ func runSetupTelemetry(ctx context.Context, interval time.Duration, cfg config.C
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
-		visible, err := database.HasVisibleSession(ctx)
-		if err == nil && visible {
-			err = cfg.ClaimSetupFinished(send)
-			if err == nil {
-				return
+		claimed, err := cfg.SetupFinishedClaimed()
+		if claimed {
+			return
+		}
+		if err == nil {
+			var visible bool
+			visible, err = database.HasVisibleSession(ctx)
+			if err == nil && visible {
+				err = cfg.ClaimSetupFinished(send)
+				if err == nil {
+					return
+				}
 			}
 		}
 		if err != nil && ctx.Err() == nil {
