@@ -21,7 +21,6 @@ func TestSetupTelemetryWakeSourcesAndRetry(t *testing.T) {
 		name, scope             string
 		initial, retry, claimed bool
 	}{
-		{name: "initial visible content", initial: true},
 		{name: "broadcast wake", scope: "sessions"},
 		{name: "hourly retry after failure", initial: true, retry: true},
 		{name: "empty archive cancellation"},

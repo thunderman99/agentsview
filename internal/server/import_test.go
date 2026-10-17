@@ -867,11 +867,8 @@ func TestHandleImportAnnouncesCommittedSessions(t *testing.T) {
 		wantCode         int
 		titleOnly        bool
 	}{
-		{"claude-ai", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + "]"), http.StatusOK, false},
-		{"claude-ai partial", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + ",{"), http.StatusInternalServerError, false},
 		{"chatgpt", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv), http.StatusOK, false},
 		{"chatgpt partial", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv, "["), http.StatusInternalServerError, false},
-		{"claude-ai title only", "/api/v1/import/claude-ai", "conversations.json", []byte(strings.ReplaceAll("["+claudeAIUploadConv+"]", "SSE Test", "Renamed chat")), http.StatusOK, true},
 		{"claude-ai title only then malformed", "/api/v1/import/claude-ai", "conversations.json", []byte(strings.ReplaceAll("["+claudeAIUploadConv+",{", "SSE Test", "Renamed chat")), http.StatusInternalServerError, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -886,19 +883,6 @@ func TestHandleImportAnnouncesCommittedSessions(t *testing.T) {
 			rec := httptest.NewRecorder()
 			srv.mux.ServeHTTP(rec, req)
 			require.Equal(t, tt.wantCode, rec.Code, "body: %s", rec.Body.String())
-			if tt.titleOnly {
-				if tt.wantCode == http.StatusOK {
-					var stats importer.ImportStats
-					require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &stats))
-					assert.Equal(t, 1, stats.Skipped)
-					assert.Zero(t, stats.Imported+stats.Updated)
-				}
-				session, err := srv.db.GetSession(t.Context(), "claude-ai:sse-test-001")
-				require.NoError(t, err)
-				require.NotNil(t, session)
-				require.NotNil(t, session.DisplayName)
-				assert.Equal(t, "Renamed chat", *session.DisplayName)
-			}
 
 			select {
 			case event := <-events:

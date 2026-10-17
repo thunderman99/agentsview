@@ -26,8 +26,13 @@ func TestRecoveryPreservesSetupClaim(t *testing.T) {
 	dbtest.WriteTestFile(t, filepath.Join(opts.DataDir, "telemetry-install-id"), []byte(installation))
 	cfg := config.Config{DataDir: opts.DataDir, InstallationID: installation}
 	require.NoError(t, cfg.ClaimSetupFinished(func() error { return nil }))
-	_, err := Capture(ctx, opts)
+	capture, err := Capture(ctx, opts)
 	require.NoError(t, err)
+	for _, omission := range capture.Omissions {
+		if omission.RootID == "application" {
+			assert.NotEqual(t, "telemetry-setup-finished", omission.Path)
+		}
+	}
 	seed := filepath.Join(t.TempDir(), "seed")
 	_, err = Seed(ctx, filepath.Join(opts.Destination, "capture.json"), seed, nil)
 	require.NoError(t, err)

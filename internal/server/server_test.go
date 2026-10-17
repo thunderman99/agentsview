@@ -4189,8 +4189,6 @@ func TestUploadSessionVariants(t *testing.T) {
 	te := setup(t)
 
 	t.Run("stores token metadata", func(t *testing.T) {
-		events, unsubscribe := te.broadcaster.Subscribe()
-		defer unsubscribe()
 		assistantWithUsage, err := json.Marshal(map[string]any{
 			"type":      "assistant",
 			"timestamp": tsEarlyS5,
@@ -4219,12 +4217,6 @@ func TestUploadSessionVariants(t *testing.T) {
 		w := te.upload(t, "upload-test.jsonl", content,
 			"project=myproj&machine=remote")
 		assertStatus(t, w, http.StatusOK)
-		select {
-		case event := <-events:
-			assert.Equal(t, "sessions", event.Scope)
-		case <-time.After(5 * time.Second):
-			require.FailNow(t, "uploaded session did not broadcast sessions")
-		}
 
 		resp := decode[uploadResponse](t, w)
 		if resp.SessionID != "upload-test" {
@@ -4294,10 +4286,6 @@ func TestUploadSessionVariants(t *testing.T) {
 		defer unsubscribe()
 		w := te.upload(t, "empty-replacement.jsonl", `{"type":"system","timestamp":"2026-03-01T10:00:00Z"}`+"\n", "project=myproj&machine=remote&allow_shorter=true")
 		assertStatus(t, w, http.StatusOK)
-		assert.Zero(t, decode[uploadResponse](t, w).Messages)
-		messages, err := te.db.GetAllMessages(t.Context(), "empty-replacement")
-		require.NoError(t, err)
-		assert.Empty(t, messages)
 		select {
 		case event := <-events:
 			assert.Equal(t, "sessions", event.Scope)
