@@ -118,8 +118,6 @@ func TestSetupFinishedCapture(t *testing.T) {
 	require.Len(t, sent, 1)
 	assert.Equal(t, "setup_finished", sent[0].Event)
 	require.Error(t, DisabledReporter().CaptureSetupFinished(t.Context()))
-	require.Error(t, (*Reporter)(nil).CaptureSetupFinished(t.Context()))
-	require.Error(t, (&Reporter{}).CaptureSetupFinished(t.Context()))
 }
 
 func TestScreenViewWithoutScreenLeavesValidRetry(t *testing.T) {

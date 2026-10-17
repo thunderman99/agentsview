@@ -866,12 +866,15 @@ func TestHandleImportAnnouncesCommittedSessions(t *testing.T) {
 		data             []byte
 		wantCode         int
 		titleOnly        bool
+		rejected         bool
 	}{
-		{"claude-ai", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + "]"), http.StatusOK, false},
-		{"claude-ai partial", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + ",{"), http.StatusInternalServerError, false},
-		{"chatgpt", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv), http.StatusOK, false},
-		{"chatgpt partial", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv, "["), http.StatusInternalServerError, false},
-		{"claude-ai title only", "/api/v1/import/claude-ai", "conversations.json", []byte(strings.ReplaceAll("["+claudeAIUploadConv+"]", "SSE Test", "Renamed chat")), http.StatusOK, true},
+		{"claude-ai", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + "]"), http.StatusOK, false, false},
+		{"claude-ai partial", "/api/v1/import/claude-ai", "conversations.json", []byte("[" + claudeAIUploadConv + ",{"), http.StatusInternalServerError, false, false},
+		{"chatgpt", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv), http.StatusOK, false, false},
+		{"chatgpt partial", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, chatGPTRefusalConv, "["), http.StatusInternalServerError, false, false},
+		{"claude-ai title only", "/api/v1/import/claude-ai", "conversations.json", []byte(strings.ReplaceAll("["+claudeAIUploadConv+"]", "SSE Test", "Renamed chat")), http.StatusOK, true, false},
+		{"claude-ai rejected", "/api/v1/import/claude-ai", "conversations.json", []byte("["), http.StatusInternalServerError, false, true},
+		{"chatgpt rejected", "/api/v1/import/chatgpt", "export.zip", chatGPTExportZip(t, "["), http.StatusInternalServerError, false, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			srv := testServer(t, 5*time.Second)
@@ -885,6 +888,14 @@ func TestHandleImportAnnouncesCommittedSessions(t *testing.T) {
 			rec := httptest.NewRecorder()
 			srv.mux.ServeHTTP(rec, req)
 			require.Equal(t, tt.wantCode, rec.Code, "body: %s", rec.Body.String())
+			if tt.rejected {
+				select {
+				case event := <-events:
+					assert.Fail(t, "rejected import broadcast a refresh", "scope: %s", event.Scope)
+				default:
+				}
+				return
+			}
 			if tt.titleOnly {
 				var stats importer.ImportStats
 				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &stats))

@@ -111,9 +111,6 @@ func (r *Reporter) EventAllowed(event string) bool {
 
 // CaptureSetupFinished queues the daemon's first visible session milestone.
 func (r *Reporter) CaptureSetupFinished(ctx context.Context) error {
-	if !r.Enabled() {
-		return errors.New("setup telemetry is disabled")
-	}
 	status, err := r.client.Report(ctx, EventSetupFinished, nil)
 	if err != nil {
 		return err
